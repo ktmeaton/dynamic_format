@@ -1,0 +1,45 @@
+jobs:
+  function:
+    steps:
+      simple:
+        function: "1 + 1"
+      expand_function:
+        function: "{x} + {y}"
+        variables:
+          x: 1
+          y:
+            - 1
+            - 2
+      expand_args:
+        function: "x + y"
+        args:
+          x: "{x}"
+          y: "{y}"
+        variables:
+          x: 1
+          y:
+            - 1
+            - 2
+          z:
+            - 4
+            - 5
+      many_args:
+        function: "{x} * 2"
+        variables:
+          x: 'list(range(1,101))'
+
+  command:
+   steps:
+      simple:
+        command: "echo test"
+      expand_command:
+        command: "echo {x}"
+        variables:
+          x:
+            - "Hello"
+            - "World"
+  dependency:
+    steps:
+      job:
+        function: "True"
+        dependency:
