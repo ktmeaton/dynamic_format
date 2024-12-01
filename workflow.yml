@@ -5,54 +5,57 @@ jobs:
         run: |
           echo test1
           echo test2
-  function:
-    steps:
-      simple:
-        function: "1 + 1"
-      # slow:
-      #   function: "time.sleep({seconds})"
+      function:
+        run:
+          function: "1+1"
+  # function:
+  #   steps:
+  #     simple:
+  #       function: "1 + 1"
+  #     slow:
+  #       function: "time.sleep({seconds})"
+  #       variables:
+  #         seconds:
+  #           - 1
+  #           - 2
+  #           - 3
+      # expand_function:
+      #   function: "{x} + {y}"
       #   variables:
-      #     seconds:
+      #     x: 1
+      #     y:
       #       - 1
       #       - 2
-      #       - 3
-      expand_function:
-        function: "{x} + {y}"
-        variables:
-          x: 1
-          y:
-            - 1
-            - 2
-      expand_args:
-        function: "x + y"
-        args:
-          x: "{x}"
-          y: "{y}"
-        variables:
-          x: 1
-          y:
-            - 1
-            - 2
-          z:
-            - 4
-            - 5
-      many_args:
-        function: "{x} * 2"
-        variables:
-          x: 'list(range(1,101))'
+      # expand_args:
+      #   function: "x + y"
+      #   args:
+      #     x: "{x}"
+      #     y: "{y}"
+      #   variables:
+      #     x: 1
+      #     y:
+      #       - 1
+      #       - 2
+      #     z:
+      #       - 4
+      #       - 5
+      # many_args:
+      #   function: "{x} * 2"
+      #   variables:
+      #     x: 'list(range(1,101))'
 
-  command:
-   steps:
-      simple:
-        command: "echo test"
-      expand_command:
-        command: "echo {x}"
-        variables:
-          x:
-            - "Hello"
-            - "World"
-  dependency:
-    steps:
-      job:
-        function: "True"
-        dependency:
+  # command:
+  #  steps:
+  #     simple:
+  #       command: "echo test"
+  #     expand_command:
+  #       command: "echo {x}"
+  #       variables:
+  #         x:
+  #           - "Hello"
+  #           - "World"
+  # dependency:
+  #   steps:
+  #     job:
+  #       function: "True"
+  #       dependency:

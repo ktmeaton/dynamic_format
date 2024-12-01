@@ -12,8 +12,11 @@ import shutil
 import sys
 from enum import Enum
 
+from io import StringIO
+from contextlib import redirect_stdout, redirect_stderr
+
 import yaml
-from rich import print
+#from rich import print
 from rich.align import Align
 from rich.console import Console
 from rich.progress import Progress, TextColumn, MofNCompleteColumn, BarColumn, TimeRemainingColumn
@@ -24,37 +27,6 @@ from rich.live import Live
 from rich.table import Table
 from rich.tree import Tree
 
-from joblib import Parallel, delayed
-
-FORMAT = "%(message)s"
-log_level = os.environ["LOGLEVEL"].upper() if "LOGLEVEL" in os.environ else "INFO"
-logging.basicConfig(level=log_level, format=FORMAT, datefmt="[%X]", handlers=[RichHandler()])
-
-#log = logging.getLogger("rich")
-#log.info("Hello, World!")
-
-
-class Display(Enum):
-    RICH = 1
-    PLAIN = 2
-
-    @classmethod
-    def _missing_(cls, value):
-        return cls.RICH
-
-    # magic methods for argparse compatibility
-    def __str__(self):
-        return self.name.lower()
-
-    def __repr__(self):
-        return str(self)
-
-    @staticmethod
-    def argparse(s):
-        try:
-            return Display[s.upper()]
-        except KeyError:
-            return s
 
 def get_cli_options():
     import argparse
@@ -64,48 +36,123 @@ def get_cli_options():
 
     #parser.add_argument('--display', help=f"Display mode. (default: {Display(None)})", type=Display.argparse, choices=list(Display), default=Display(None))
     parser.add_argument('-w', '--workflow', help="Workflow YAML file", required=True)
+    parser.add_argument('--unsafe', help="Enabled unsafe mode", dest="safe", action="store_false")
     return parser.parse_args()
+
+class TaskStatus(Enum):
+    PENDING = 1
+    RUNNING = 2
+    COMPLETE = 3
+
+    def __repr__(self):
+        return str(self)
+
+class TaskResult(Enum):
+    UNKNOWN = 1
+    PASS = 2
+    FAIL = 3
+
+    def __repr__(self):
+        return str(self)
 
 class Task:
 
-    def __init__(self, name:str, data:dict):
+    def __init__(self, name:str, data:dict, safe:bool=True):
         self.name = name
+        self.safe = safe
         self.data = data
-        self.fn   = None
+        self.status = TaskStatus.PENDING
+        self.result = TaskResult.UNKNOWN
+        self.stdout = None
+        self.stderr = None
+        self.output = None
+        self.error = None
+        self.return_code = None
 
-    @property
     def fn(self):
-        return self._fn
+        """
+        Create a dynamic function from the run data
+        """
 
-    @fn.setter
-    def fn(self, value):
-        # Todo
-        if "run" not in self.data: return None
+        fn_content = "return 0"
 
-        run_data = self.data["run"]
+        if "run" in self.data:
+            run_data = self.data["run"]
 
-        # Option 1. Shelll Command
-        if type(run_data) == str:
-            lines = [l.strip() for l in run_data.split("\n") if l != ""]
-            fn_lines = []
-            for line in lines:
-                command = [word for word in line.split(" ") if word != ""]
-                fn_line = f"\tsubprocess.run({command}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)"
-                fn_lines.append(fn_line)
-            fn_def = "async def fn():\n" + "\n".join(fn_lines)
-            self._fn = fn_def
+            # Option 1. Shell Command
+            if type(run_data) == str:
+                lines = [l.strip() for l in run_data.split("\n") if l != ""]
+                fn_lines = ["import subprocess"]
+                for line in lines:
+                    command = [word for word in line.split(" ") if word != ""]
+                    fn_line = f"subprocess.run({command})"
+                    fn_lines.append(fn_line)
+                fn_content = ";".join(fn_lines)
+            elif type(run_data) == dict and "function" in run_data:
+                fn_content = run_data["function"]
 
-    # @name.setter
-    # def fn(self):
-    #     if "run" not in self.data: return None
-    #     # Plain string, like github CI
-    #     run_data = self.data["run"]
-    #     if type(self.data["run"]) == str:
-    #         ...
-    #     print(run_data)
+        return fn_content
+
+
+    async def run(self, pass_codes=[0]):
+        g = {"__builtins__": {}} if self.safe else {}
+
+        cmd = "echo test > test.txt"
+        proc = await asyncio.create_subprocess_shell(
+            cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE)
+
+        stdout, stderr = await proc.communicate()
+        self.return_code = proc.returncode
+        if stdout:
+            self.stdout = stdout.decode().strip()
+        if stderr:
+            self.stderr = stderr.decode().strip()
+
+        self.status = TaskStatus.COMPLETE
+
+        if self.return_code == 0:
+            self.result = TaskResult.PASS
+        else:
+            self.result = TaskResult.FAIL
+        # stdout = StringIO()
+        # stderr = StringIO()
+        # output = None
+
+        # with redirect_stdout(stdout):
+        #     with redirect_stderr(stderr):
+        #         try:
+        #             fn_content = self.fn()
+        #             #exec(f"def fn(): return({fn_content})", g, locals())
+        #             exec(f"def fn(): {fn_content}", g, locals())
+        #             self.output = locals()["fn"]()
+        #             self.result = TaskResult.PASS
+        #             print(stdout.getvalue())
+        #         except Exception as e:
+        #             result = TaskResult.FAIL
+        #             self.error = str(e)
+        #             self.result = TaskResult.FAIL
+
+        # self.stdout = stdout.getvalue().strip()
+        # self.stderr = stderr.getvalue().strip()
+        # self.status = TaskStatus.COMPLETE
+
+
+    def summary(self):
+        msg = self.name
+        if self.status in [TaskStatus.PENDING, TaskStatus.RUNNING]:
+            msg += f" | status: {self.status.name}"
+        elif self.status == TaskStatus.COMPLETE:
+            msg += f" | result: {self.result.name} | return_code: {self.return_code}"
+            if self.result == TaskResult.FAIL:
+                msg += f" | error: {self.error}"
+            elif self.result == TaskResult.PASS:
+                msg += f" | stdout: {self.stdout}"
+        return msg
 
     def __repr__(self):
-        return f"Task(name: {self.name}, data: {self.data})"
+        return self.name
 
 class ConsolePanel(Console):
     def __init__(self,*args,**kwargs):
@@ -119,21 +166,20 @@ class ConsolePanel(Console):
 
 class Gui():
 
-    def __init__(self, display:Display=Display(None)):
-        self.display = display
+    def __init__(self):
         self.padding = (2,2)
         self.border_style = "white"
         self.layout = Layout(name="root")
 
         self.layout.split(
             Layout(name="header", size=3),
-            Layout(name="main", ratio=1),
-            Layout(name="summary", size=7),
+            Layout(name="main", ratio=2),
+            Layout(name="log", ratio=1),
         )
         self.layout["main"].split_row(
             Layout(name="tree", ratio=1),
             Layout(name="progress", ratio=2),
-            Layout(name="log", ratio=2),
+            Layout(name="something", ratio=2),
         )
 
         # Header
@@ -176,34 +222,6 @@ class Gui():
                 )
             )
         self.layout["progress_summary"].split_row(*progress_summary)
-        # progress_table.add_row(*row)
-        # progress_table.add_row(
-        #     Panel(
-        #         Align(self.overall_progress, align="center"),
-        #         title="Complete",
-        #         border_style=self.border_style,
-        #         padding=(0,0),
-        #     ),
-        #     Panel(
-        #         self.pass_progress,
-        #         title="Pass",
-        #         border_style=self.border_style,
-        #         padding=(0,0),
-        #     ), 
-        #     Panel(
-        #         self.fail_progress,
-        #         title="Fail",
-        #         border_style=self.border_style,
-        #         padding=(0,0),
-        #     ),
-        #     Panel(
-        #         self.running_progress,
-        #         title="Running",
-        #         border_style=self.border_style,
-        #         padding=(0,0),
-        #     )
-        # )
-        #self.layout["progress_overall"].update(progress_table)
         self.progress = Progress(
             TextColumn("{task.description}"),
             BarColumn(),
@@ -239,7 +257,7 @@ class Gui():
             self.log,
             title="Log",
             border_style=self.border_style,
-            padding=self.padding, 
+            padding=(0,0), 
         )
         self.layout["log"].update(log_panel)
 
@@ -296,12 +314,14 @@ def dynamic_step(data:dict):
     return data
 
 
-async def main(workflow:str, display:Display=Display(None)):
+async def main(workflow:str, safe:bool=True):
     workflow_path = workflow
     with open(workflow) as infile:
         workflow = yaml.safe_load(infile)
     del infile
-    gui = Gui(display)
+    gui = Gui()
+
+    #loop = asyncio.new_event_loop()
 
     with Live(gui.layout, refresh_per_second=10, screen=True):
         gui.log.print(f"[WORKFLOW] Running: {workflow_path}")
@@ -318,39 +338,42 @@ async def main(workflow:str, display:Display=Display(None)):
             for step,step_data in steps.items():
                 gui.log.print(f"[STEP] Running: {step}")
                 step_tree = job_tree.add(step)
-                processes = dynamic_step(step_data)
-                # Convert to class here
-                tasks = processes
-
+                tasks = dynamic_step(step_data)
                 step_progress = gui.progress.add_task(f"    [red]{step}", total=len(tasks), current=f"")
-                for task in tasks:
+                for i,task_data in enumerate(tasks):
+                    task = Task(name=f"{job}.{step}.{i}", data=task_data, safe=safe)
                     gui.overall_progress._tasks[0].total += 1
-                    task_short = str(task)[0:100] + "..." if len(str(task)) > 100 else str(task)
-                    gui.log.print(f"[TASK] Dispatching: {task_short}")
+                    #task_short = str(task)[0:100] + "..." if len(str(task)) > 100 else str(task)
+                    #gui.log.print(f"[TASK] Dispatching: {task_short}")
                     current = ""
                     fn_def = "async def fn(): None"
                     args = {}
-                    # Option 1. Function
-                    if "function" in task:
-                        args = task["args"] if "args" in task else {}
-                        fn_def = "async def fn({args}): {f}".format(
-                            args=",".join([k for k in args]),
-                            f = task['function']
-                        )                          
-                        if len(args) > 0:
-                            current = " ".join([f"{k}={v}" for k,v in args.items()])
-                        else:
-                            current = task['function']
-                        current = f"\[{current}]"
-                    elif "command" in task:
-                        command = [word for word in task["command"].split(" ") if word != ""]
-                        fn_def = "async def fn(): {f}".format(
-                            f=f"subprocess.run({command}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)"
-                        )
-                        args = {}
-                        current = f"\[{task['command']}]"
-                    exec(fn_def, globals())  
-                    await fn(**args)
+                    # # Option 1. Function
+                    # if "function" in task:
+                    #     args = task["args"] if "args" in task else {}
+                    #     fn_def = "async def fn({args}): {f}".format(
+                    #         args=",".join([k for k in args]),
+                    #         f = task['function']
+                    #     )                          
+                    #     if len(args) > 0:
+                    #         current = " ".join([f"{k}={v}" for k,v in args.items()])
+                    #     else:
+                    #         current = task['function']
+                    #     current = f"\[{current}]"
+                    # elif "command" in task:
+                    #     command = [word for word in task["command"].split(" ") if word != ""]
+                    #     fn_def = "async def fn(): {f}".format(
+                    #         f=f"subprocess.run({command}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)"
+                    #     )
+                    #     args = {}
+                    #     current = f"\[{task['command']}]"
+
+                    gui.log.print(f"[TASK] {task}")
+                    await task.run()
+                    time.sleep(1)
+                    gui.log.print(f"[TASK] {task.summary()}", soft_wrap=False)
+                    #exec(fn_def, {}, {})  
+                    #await fn(**args)
 
                     task_tree = step_tree.add(current)
                     time.sleep(0.05)

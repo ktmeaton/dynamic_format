@@ -3,6 +3,5 @@ name = "dynamic-format"
 version = "0.1.0"
 dependencies = [
     "rich",
-    "joblib",
     "pyyaml"
 ]
