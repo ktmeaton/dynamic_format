@@ -6,14 +6,13 @@ import re
 import copy
 import subprocess
 import asyncio
-import logging
 import os
 import shutil
 import sys
 from enum import Enum
 
 from io import StringIO
-from contextlib import redirect_stdout, redirect_stderr
+from contextlib import redirect_stdout, redirect_stderr, nullcontext
 
 import yaml
 #from rich import print
@@ -21,12 +20,26 @@ from rich.align import Align
 from rich.console import Console
 from rich.progress import Progress, TextColumn, MofNCompleteColumn, BarColumn, TimeRemainingColumn
 from rich.layout import Layout
-from rich.logging import RichHandler
 from rich.panel import Panel
 from rich.live import Live
 from rich.table import Table
 from rich.tree import Tree
 
+
+class Display(Enum):
+    RICH = 1
+    TEXT = 2
+
+    def __str__(self):
+        return self.name.lower()
+    def __repr__(self):
+        return str(self)
+    @staticmethod
+    def argparse(s):
+        try:
+            return Display[s.upper()]
+        except KeyError:
+            return s
 
 def get_cli_options():
     import argparse
@@ -34,7 +47,7 @@ def get_cli_options():
     description = 'Description goes here!.'
     parser = argparse.ArgumentParser(description=description)
 
-    #parser.add_argument('--display', help=f"Display mode. (default: {Display(None)})", type=Display.argparse, choices=list(Display), default=Display(None))
+    parser.add_argument('--display', help=f"Display mode. (default: {Display.RICH})", type=Display.argparse, choices=list(Display), default=Display.RICH)
     parser.add_argument('-w', '--workflow', help="Workflow YAML file", required=True)
     parser.add_argument('--unsafe', help="Enabled unsafe mode", dest="safe", action="store_false")
     return parser.parse_args()
@@ -68,13 +81,38 @@ class Task:
         self.output = None
         self.error = None
         self.return_code = None
+        self.command = None
 
-    def fn(self):
+    # def fn(self):
+    #     """
+    #     Create a dynamic function from the run data
+    #     """
+
+    #     fn_content = "return 0"
+
+    #     if "run" in self.data:
+    #         run_data = self.data["run"]
+
+    #         # Option 1. Shell Command
+    #         if type(run_data) == str:
+    #             lines = [l.strip() for l in run_data.split("\n") if l != ""]
+    #             fn_lines = ["import subprocess"]
+    #             for line in lines:
+    #                 command = [word for word in line.split(" ") if word != ""]
+    #                 fn_line = f"subprocess.run({command})"
+    #                 fn_lines.append(fn_line)
+    #             fn_content = ";".join(fn_lines)
+    #         elif type(run_data) == dict and "function" in run_data:
+    #             fn_content = run_data["function"]
+
+    #     return fn_content
+
+    def command(self):
         """
-        Create a dynamic function from the run data
+        Create a dynamic command from the run data
         """
 
-        fn_content = "return 0"
+        command = None
 
         if "run" in self.data:
             run_data = self.data["run"]
@@ -88,16 +126,14 @@ class Task:
                     fn_line = f"subprocess.run({command})"
                     fn_lines.append(fn_line)
                 fn_content = ";".join(fn_lines)
-            elif type(run_data) == dict and "function" in run_data:
-                fn_content = run_data["function"]
 
-        return fn_content
+        self.command = command
 
 
     async def run(self, pass_codes=[0]):
         g = {"__builtins__": {}} if self.safe else {}
 
-        cmd = "echo test > test.txt"
+        cmd = "echo test1 > test.txt; echo test2 >> test.txt"
         proc = await asyncio.create_subprocess_shell(
             cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -116,27 +152,6 @@ class Task:
             self.result = TaskResult.PASS
         else:
             self.result = TaskResult.FAIL
-        # stdout = StringIO()
-        # stderr = StringIO()
-        # output = None
-
-        # with redirect_stdout(stdout):
-        #     with redirect_stderr(stderr):
-        #         try:
-        #             fn_content = self.fn()
-        #             #exec(f"def fn(): return({fn_content})", g, locals())
-        #             exec(f"def fn(): {fn_content}", g, locals())
-        #             self.output = locals()["fn"]()
-        #             self.result = TaskResult.PASS
-        #             print(stdout.getvalue())
-        #         except Exception as e:
-        #             result = TaskResult.FAIL
-        #             self.error = str(e)
-        #             self.result = TaskResult.FAIL
-
-        # self.stdout = stdout.getvalue().strip()
-        # self.stderr = stderr.getvalue().strip()
-        # self.status = TaskStatus.COMPLETE
 
 
     def summary(self):
@@ -164,19 +179,40 @@ class ConsolePanel(Console):
         for line in texts[-options.height:]:
             yield line
 
-class Gui():
+class Workflow():
+    def __init__(self, data:dict, display:Display=Display.RICH):
+        self.data = data
+        if "name" not in self.data:
+            raise Exception("Workflow does not have a name.")
+        self.name = self.data["name"]
+        self.display = display
+        self.init_gui()
+        self.jobs = self.data["jobs"] if "jobs" in self.data else {}
 
-    def __init__(self):
-        self.padding = (2,2)
-        self.border_style = "white"
-        self.layout = Layout(name="root")
+    def __repr__(self):
+        return self.name
 
-        self.layout.split(
+    def logging(self, message:str, level:str="INFO", formatter:str="{now}\t[{level}] {message}"):
+        message = formatter.format(level=level, message=message, now=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        if self.display == Display.RICH:
+            self.log.print(message)
+        else:
+            print(message)
+
+    def init_gui(self):
+        padding = (2,2)
+        border_style = "white"
+
+        self.gui = Layout(name="root")
+
+        # Split the screen vertically into 3
+        self.gui.split(
             Layout(name="header", size=3),
             Layout(name="main", ratio=2),
             Layout(name="log", ratio=1),
         )
-        self.layout["main"].split_row(
+        # Split the main section horizontally into 3
+        self.gui["main"].split_row(
             Layout(name="tree", ratio=1),
             Layout(name="progress", ratio=2),
             Layout(name="something", ratio=2),
@@ -190,12 +226,11 @@ class Gui():
             "[b]Dynamic Format[/b] Layout application",
             datetime.now().ctime().replace(":", "[blink]:[/]"),
         )
-        self.header = Panel(grid, style="white on blue")
-        self.layout["header"].update(self.header)
-
+        header = Panel(grid, style="white on blue")
+        self.gui["header"].update(header)
 
         # Progress
-        self.layout["progress"].split(
+        self.gui["progress"].split(
             Layout(name="progress_summary", size=3),
             Layout(name="progress_jobs")
         )
@@ -217,11 +252,12 @@ class Gui():
                 Panel(
                     Align(renderable, align="center"),
                     title=title,
-                    border_style=self.border_style,
+                    border_style=border_style,
                     padding=(0,0),
                 )
             )
-        self.layout["progress_summary"].split_row(*progress_summary)
+        self.gui["progress_summary"].split_row(*progress_summary)
+
         self.progress = Progress(
             TextColumn("{task.description}"),
             BarColumn(),
@@ -233,10 +269,10 @@ class Gui():
         progress_panel = Panel(
             self.progress,
             title="Progress",
-            border_style=self.border_style,
-            padding=self.padding,
+            border_style=border_style,
+            padding=padding,
         )
-        self.layout["progress_jobs"].update(progress_panel)
+        self.gui["progress_jobs"].update(progress_panel)
 
 
         # Task Tree
@@ -244,10 +280,10 @@ class Gui():
         tree_panel = Panel(
             self.tree,
             title="Active Tasks",
-            border_style=self.border_style,
-            padding=self.padding,
+            border_style=border_style,
+            padding=padding,
         )
-        self.layout["tree"].update(tree_panel)
+        self.gui["tree"].update(tree_panel)
         for task in self.progress.tasks:
             self.tree.add(task.description)
 
@@ -256,148 +292,131 @@ class Gui():
         log_panel = Panel(
             self.log,
             title="Log",
-            border_style=self.border_style,
+            border_style=border_style,
             padding=(0,0), 
         )
-        self.layout["log"].update(log_panel)
+        self.gui["log"].update(log_panel)
 
 
-def dynamic_format(data, vars:dict, allow_missing=True, parent=None):
-    if type(data) == dict:
-        for k,v in data.items():
-            v_data, vars = dynamic_format(v, vars, allow_missing, parent=k)
-            data[k] = v_data
-    elif type(data) == list:
-        for i,v in enumerate(data):
-            v_data, vars = dynamic_format(v, vars, allow_missing, parent=parent)
-            data[i] = v_data
-    else:
-        data = str(data)
-        format_dict = {}
-        regex = "(?<!{{)(?<={)[A-Za-z0-9_]+(?=})(?!}})"
-        for match in re.finditer(regex, data):
-            var = match.group()
-            format_dict[var] = vars[var] if var in vars else f"{{{var}}}"
-            if not allow_missing:
-                raise Exception(f"Undefined format variable `{var}` in {parent} = {data}")
-        data = data.format(**format_dict)
-    return (data, vars)
+    def dynamic_format(self, data, vars:dict, allow_missing=True, parent=None):
+        if type(data) == dict:
+            for k,v in data.items():
+                v_data, vars = self.dynamic_format(v, vars, allow_missing, parent=k)
+                data[k] = v_data
+        elif type(data) == list:
+            for i,v in enumerate(data):
+                v_data, vars = self.dynamic_format(v, vars, allow_missing, parent=parent)
+                data[i] = v_data
+        else:
+            data = str(data)
+            format_dict = {}
+            regex = "(?<!{{)(?<={)[A-Za-z0-9_]+(?=})(?!}})"
+            for match in re.finditer(regex, data):
+                var = match.group()
+                format_dict[var] = vars[var] if var in vars else f"{{{var}}}"
+                if not allow_missing:
+                    raise Exception(f"Undefined format variable `{var}` in {parent} = {data}")
+            data = data.format(**format_dict)
+        return (data, vars)
 
-def dynamic_step(data:dict):
-    variables = data["variables"] if "variables" in data else {}
-    data = [data]
-    for k,v in variables.items():
-        if type(v) == dict: continue
-        elif type(v) != list:
-            try:
-                v = eval(v)
-                v = [v] if type(v) != list else v
-            except:
-                v = [v]
-        values = v
+    def dynamic_tasks(self, data:dict):
+        variables = data["variables"] if "variables" in data else {}
+        data = [data]
+        for k,v in variables.items():
+            if type(v) == dict: continue
+            elif type(v) != list:
+                try:
+                    v = eval(v)
+                    v = [v] if type(v) != list else v
+                except:
+                    v = [v]
+            values = v
 
-        data_expanded = []
-        for d in data:
-            for v in values:
-                exec(f"{k} = '{v}'")
-                v_data = copy.deepcopy(d)
-                dynamic_format(v_data, locals())
-                data_expanded.append(v_data)
+            data_expanded = []
+            for d in data:
+                for v in values:
+                    exec(f"{k} = '{v}'")
+                    v_data = copy.deepcopy(d)
+                    self.dynamic_format(v_data, locals())
+                    data_expanded.append(v_data)
 
-        data = data_expanded
+            data = data_expanded
 
-    # Final pass, make sure no missing var?
-    for i,d in enumerate(data):
-        dynamic_format(d, locals(), allow_missing=False)
-        data[i] = d
+        # Final pass, make sure no missing var?
+        for i,d in enumerate(data):
+            self.dynamic_format(d, locals(), allow_missing=False)
+            data[i] = d
 
-    return data
+        return data
 
 
-async def main(workflow:str, safe:bool=True):
+async def main(workflow:str, safe:bool=True, display:Display=Display.RICH):
     workflow_path = workflow
     with open(workflow) as infile:
-        workflow = yaml.safe_load(infile)
-    del infile
-    gui = Gui()
+        data = yaml.safe_load(infile)
+    workflow = Workflow(data=data, display=display)
 
-    #loop = asyncio.new_event_loop()
 
-    with Live(gui.layout, refresh_per_second=10, screen=True):
-        gui.log.print(f"[WORKFLOW] Running: {workflow_path}")
-        for job,job_data in workflow["jobs"].items():
-            gui.log.print(f"[JOB] Running: {job}")
-            job_tree = gui.tree.add(job)
+    with Live(workflow.gui, refresh_per_second=10, screen=True) if display == Display.RICH else nullcontext():
+        workflow.logging(f"Starting workflow: {workflow}", level="INFO")
+
+        # Iterate through jobs
+        for job,job_data in workflow.jobs.items():
+            workflow.logging(f"Starting job: {job}", level="INFO")
+            job_tree = workflow.tree.add(job)
             steps = job_data["steps"] if job_data != None and "steps" in job_data and job_data["steps"] != None else {}
             num_steps = len(steps)
-            job_progress = gui.progress.add_task(f"[red]{job}", total=num_steps, current="")
+            job_progress = workflow.progress.add_task(f"[red]{job}", total=num_steps, current="")
 
             if num_steps == 0:
-                progress.update(job_progress, advance=1)
+                workflow.progress.update(job_progress, advance=1)
                 continue
             for step,step_data in steps.items():
-                gui.log.print(f"[STEP] Running: {step}")
+                workflow.logging(f"Starting step: {step}", level="INFO")
                 step_tree = job_tree.add(step)
-                tasks = dynamic_step(step_data)
-                step_progress = gui.progress.add_task(f"    [red]{step}", total=len(tasks), current=f"")
+                tasks = workflow.dynamic_tasks(step_data)
+
+                step_progress = workflow.progress.add_task(f"    [red]{step}", total=len(tasks), current=f"")
                 for i,task_data in enumerate(tasks):
                     task = Task(name=f"{job}.{step}.{i}", data=task_data, safe=safe)
-                    gui.overall_progress._tasks[0].total += 1
-                    #task_short = str(task)[0:100] + "..." if len(str(task)) > 100 else str(task)
-                    #gui.log.print(f"[TASK] Dispatching: {task_short}")
+                    workflow.overall_progress._tasks[0].total += 1
                     current = ""
                     fn_def = "async def fn(): None"
                     args = {}
-                    # # Option 1. Function
-                    # if "function" in task:
-                    #     args = task["args"] if "args" in task else {}
-                    #     fn_def = "async def fn({args}): {f}".format(
-                    #         args=",".join([k for k in args]),
-                    #         f = task['function']
-                    #     )                          
-                    #     if len(args) > 0:
-                    #         current = " ".join([f"{k}={v}" for k,v in args.items()])
-                    #     else:
-                    #         current = task['function']
-                    #     current = f"\[{current}]"
-                    # elif "command" in task:
-                    #     command = [word for word in task["command"].split(" ") if word != ""]
-                    #     fn_def = "async def fn(): {f}".format(
-                    #         f=f"subprocess.run({command}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)"
-                    #     )
-                    #     args = {}
-                    #     current = f"\[{task['command']}]"
 
-                    gui.log.print(f"[TASK] {task}")
+                    workflow.logging(f"Dispatching task: {task}")
                     await task.run()
                     time.sleep(1)
-                    gui.log.print(f"[TASK] {task.summary()}", soft_wrap=False)
+                    workflow.logging(f"Completed task: {task.summary()}")
                     #exec(fn_def, {}, {})  
                     #await fn(**args)
 
                     task_tree = step_tree.add(current)
-                    time.sleep(0.05)
+                    #time.sleep(0.05)
 
                     # When we know task is complete
                     step_tree.children = [c for c in step_tree.children if c != task_tree]
-                    gui.progress.update(step_progress, advance=1, current=current)
-                    gui.overall_progress.update(0, advance=1)
+                    workflow.progress.update(step_progress, advance=1, current=current)
+                    workflow.overall_progress.update(0, advance=1)
                 job_tree.children = [c for c in job_tree.children if c != step_tree]
-                gui.log.print(f"[STEP] Completed: {step}")
+                workflow.logging(f"Completed step: {step}")
 
-            gui.tree.children = [c for c in gui.tree.children if c != job_tree]
-            gui.progress.update(job_progress, advance=1)
+            workflow.tree.children = [c for c in workflow.tree.children if c != job_tree]
+            workflow.progress.update(job_progress, advance=1)
 
-            gui.log.print(f"[JOB] Completed: {job}")
+            workflow.logging(f"Completed job: {job}")
 
-        while not gui.progress.finished:
-            for task in gui.progress.tasks:
+        # At this point, the workflow has been fully queued
+        completed = False
+        while not workflow.progress.finished and not completed:
+            for task in workflow.progress.tasks:
                 if task.completed:
                     task.visible = False
-            #completed = sum(task.completed for task in gui.progress.tasks)
-            #gui.progress.update(0, completed=completed)
-            #gui.log.print(f"[WORKFLOW] Completed: {completed}")
-        while True:
+            completed = sum(task.completed for task in workflow.progress.tasks) == len(workflow.progress.tasks)
+        workflow.logging(f"Completed workflow: {workflow}")
+
+        # Leave the Rich display on permanently
+        while display == Display.RICH:
             ...
 
 

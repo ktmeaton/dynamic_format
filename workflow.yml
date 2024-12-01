@@ -1,3 +1,7 @@
+name: my_workflow
+on:
+env:
+
 jobs:
   run:
     steps:
