@@ -1,14 +1,248 @@
 #!/usr/bin/env python3
 
+from datetime import datetime
 import time
 import re
 import copy
 import subprocess
 import asyncio
+import logging
+import os
+import shutil
+import sys
+from enum import Enum
 
 import yaml
+from rich import print
+from rich.align import Align
+from rich.console import Console
 from rich.progress import Progress, TextColumn, MofNCompleteColumn, BarColumn, TimeRemainingColumn
+from rich.layout import Layout
+from rich.logging import RichHandler
+from rich.panel import Panel
+from rich.live import Live
+from rich.table import Table
+from rich.tree import Tree
+
 from joblib import Parallel, delayed
+
+FORMAT = "%(message)s"
+log_level = os.environ["LOGLEVEL"].upper() if "LOGLEVEL" in os.environ else "INFO"
+logging.basicConfig(level=log_level, format=FORMAT, datefmt="[%X]", handlers=[RichHandler()])
+
+#log = logging.getLogger("rich")
+#log.info("Hello, World!")
+
+
+class Display(Enum):
+    RICH = 1
+    PLAIN = 2
+
+    @classmethod
+    def _missing_(cls, value):
+        return cls.RICH
+
+    # magic methods for argparse compatibility
+    def __str__(self):
+        return self.name.lower()
+
+    def __repr__(self):
+        return str(self)
+
+    @staticmethod
+    def argparse(s):
+        try:
+            return Display[s.upper()]
+        except KeyError:
+            return s
+
+def get_cli_options():
+    import argparse
+
+    description = 'Description goes here!.'
+    parser = argparse.ArgumentParser(description=description)
+
+    #parser.add_argument('--display', help=f"Display mode. (default: {Display(None)})", type=Display.argparse, choices=list(Display), default=Display(None))
+    parser.add_argument('-w', '--workflow', help="Workflow YAML file", required=True)
+    return parser.parse_args()
+
+class Task:
+
+    def __init__(self, name:str, data:dict):
+        self.name = name
+        self.data = data
+        self.fn   = None
+
+    @property
+    def fn(self):
+        return self._fn
+
+    @fn.setter
+    def fn(self, value):
+        # Todo
+        if "run" not in self.data: return None
+
+        run_data = self.data["run"]
+
+        # Option 1. Shelll Command
+        if type(run_data) == str:
+            lines = [l.strip() for l in run_data.split("\n") if l != ""]
+            fn_lines = []
+            for line in lines:
+                command = [word for word in line.split(" ") if word != ""]
+                fn_line = f"\tsubprocess.run({command}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)"
+                fn_lines.append(fn_line)
+            fn_def = "async def fn():\n" + "\n".join(fn_lines)
+            self._fn = fn_def
+
+    # @name.setter
+    # def fn(self):
+    #     if "run" not in self.data: return None
+    #     # Plain string, like github CI
+    #     run_data = self.data["run"]
+    #     if type(self.data["run"]) == str:
+    #         ...
+    #     print(run_data)
+
+    def __repr__(self):
+        return f"Task(name: {self.name}, data: {self.data})"
+
+class ConsolePanel(Console):
+    def __init__(self,*args,**kwargs):
+        console_file = open(os.devnull,'w')
+        super().__init__(record=True,file=console_file,*args,**kwargs)
+
+    def __rich_console__(self,console,options):
+        texts = self.export_text(clear=False).split('\n')
+        for line in texts[-options.height:]:
+            yield line
+
+class Gui():
+
+    def __init__(self, display:Display=Display(None)):
+        self.display = display
+        self.padding = (2,2)
+        self.border_style = "white"
+        self.layout = Layout(name="root")
+
+        self.layout.split(
+            Layout(name="header", size=3),
+            Layout(name="main", ratio=1),
+            Layout(name="summary", size=7),
+        )
+        self.layout["main"].split_row(
+            Layout(name="tree", ratio=1),
+            Layout(name="progress", ratio=2),
+            Layout(name="log", ratio=2),
+        )
+
+        # Header
+        grid = Table.grid(expand=True)
+        grid.add_column(justify="center", ratio=1)
+        grid.add_column(justify="right")
+        grid.add_row(
+            "[b]Dynamic Format[/b] Layout application",
+            datetime.now().ctime().replace(":", "[blink]:[/]"),
+        )
+        self.header = Panel(grid, style="white on blue")
+        self.layout["header"].update(self.header)
+
+
+        # Progress
+        self.layout["progress"].split(
+            Layout(name="progress_summary", size=3),
+            Layout(name="progress_jobs")
+        )
+        self.overall_progress = Progress(TextColumn("{task.completed}"))
+        self.overall_progress.add_task("completed", total=0)
+        self.pass_progress = Progress(TextColumn("[green]{task.completed}"))
+        self.pass_progress.add_task("pass", total=0)
+        self.fail_progress = Progress(TextColumn("[red]{task.completed}"))
+        self.fail_progress.add_task("fail", total=0)
+        self.running_progress = Progress(TextColumn("[blue]{task.completed}"))
+        self.running_progress.add_task("run", total=0)
+
+        progress_summary = []
+        for title,renderable in zip(
+            ["Complete", "Pass", "Fail", "Running"],
+            [self.overall_progress, self.pass_progress, self.fail_progress, self.running_progress]
+            ):
+            progress_summary.append(
+                Panel(
+                    Align(renderable, align="center"),
+                    title=title,
+                    border_style=self.border_style,
+                    padding=(0,0),
+                )
+            )
+        self.layout["progress_summary"].split_row(*progress_summary)
+        # progress_table.add_row(*row)
+        # progress_table.add_row(
+        #     Panel(
+        #         Align(self.overall_progress, align="center"),
+        #         title="Complete",
+        #         border_style=self.border_style,
+        #         padding=(0,0),
+        #     ),
+        #     Panel(
+        #         self.pass_progress,
+        #         title="Pass",
+        #         border_style=self.border_style,
+        #         padding=(0,0),
+        #     ), 
+        #     Panel(
+        #         self.fail_progress,
+        #         title="Fail",
+        #         border_style=self.border_style,
+        #         padding=(0,0),
+        #     ),
+        #     Panel(
+        #         self.running_progress,
+        #         title="Running",
+        #         border_style=self.border_style,
+        #         padding=(0,0),
+        #     )
+        # )
+        #self.layout["progress_overall"].update(progress_table)
+        self.progress = Progress(
+            TextColumn("{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TimeRemainingColumn(),
+            #MofNCompleteColumn("/"),
+            #TextColumn("[yellow]{task.fields[current]}")
+        )
+        progress_panel = Panel(
+            self.progress,
+            title="Progress",
+            border_style=self.border_style,
+            padding=self.padding,
+        )
+        self.layout["progress_jobs"].update(progress_panel)
+
+
+        # Task Tree
+        self.tree = Tree("Tasks")
+        tree_panel = Panel(
+            self.tree,
+            title="Active Tasks",
+            border_style=self.border_style,
+            padding=self.padding,
+        )
+        self.layout["tree"].update(tree_panel)
+        for task in self.progress.tasks:
+            self.tree.add(task.description)
+
+        # Log
+        self.log = ConsolePanel()
+        log_panel = Panel(
+            self.log,
+            title="Log",
+            border_style=self.border_style,
+            padding=self.padding, 
+        )
+        self.layout["log"].update(log_panel)
+
 
 def dynamic_format(data, vars:dict, allow_missing=True, parent=None):
     if type(data) == dict:
@@ -60,58 +294,92 @@ def dynamic_step(data:dict):
         data[i] = d
 
     return data
-    
 
-def main():
-    with open("jobs.yaml") as infile:
+
+async def main(workflow:str, display:Display=Display(None)):
+    workflow_path = workflow
+    with open(workflow) as infile:
         workflow = yaml.safe_load(infile)
     del infile
+    gui = Gui(display)
 
-    with Progress(
-        TextColumn("{task.description}"),
-        BarColumn(),
-        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        TimeRemainingColumn(),
-        MofNCompleteColumn("/"),
-        TextColumn("[yellow]{task.fields[current]}")
-        ) as progress:
+    with Live(gui.layout, refresh_per_second=10, screen=True):
+        gui.log.print(f"[WORKFLOW] Running: {workflow_path}")
+        for job,job_data in workflow["jobs"].items():
+            gui.log.print(f"[JOB] Running: {job}")
+            job_tree = gui.tree.add(job)
+            steps = job_data["steps"] if job_data != None and "steps" in job_data and job_data["steps"] != None else {}
+            num_steps = len(steps)
+            job_progress = gui.progress.add_task(f"[red]{job}", total=num_steps, current="")
 
-            for job,job_data in workflow["jobs"].items():
-                steps = job_data["steps"] if job_data != None and "steps" in job_data and job_data["steps"] != None else {}
-                num_steps = len(steps)
-                job_progress = progress.add_task(f"[red]{job}", total=num_steps, current="")
+            if num_steps == 0:
+                progress.update(job_progress, advance=1)
+                continue
+            for step,step_data in steps.items():
+                gui.log.print(f"[STEP] Running: {step}")
+                step_tree = job_tree.add(step)
+                processes = dynamic_step(step_data)
+                # Convert to class here
+                tasks = processes
 
-                if num_steps == 0:
-                    progress.update(job_progress, advance=1)
-                    continue
-                for step,step_data in steps.items():
-                    processes = dynamic_step(step_data)
-                    step_progress = progress.add_task(f"    [red]{step}", total=len(processes), current=f"")
-                    for p in processes:
-                        current = ""
-                        # Option 1. Function
-                        if "function" in p:
-                            args = p["args"] if "args" in p else {}
-                            fn_def = "async def fn({args}): {f}".format(
-                                args=",".join([k for k in args]),
-                                f = p['function']
-                            )                          
-                            if len(args) > 0:
-                                current = " ".join([f"{k}={v}" for k,v in args.items()])
-                            else:
-                                current = p['function']
-                            current = f"\[{current}]"
-                        elif "command" in p:
-                            command = [word for word in p["command"].split(" ") if word != ""]
-                            fn_def = "async def fn(): {f}".format(
-                                f=f"subprocess.run({command}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)"
-                            )
-                            args = {}
-                            current = f"\[{p['command']}]"
-                        exec(fn_def, globals())  
-                        asyncio.run(fn(**args))
-                        progress.update(step_progress, advance=1, current=current)
+                step_progress = gui.progress.add_task(f"    [red]{step}", total=len(tasks), current=f"")
+                for task in tasks:
+                    gui.overall_progress._tasks[0].total += 1
+                    task_short = str(task)[0:100] + "..." if len(str(task)) > 100 else str(task)
+                    gui.log.print(f"[TASK] Dispatching: {task_short}")
+                    current = ""
+                    fn_def = "async def fn(): None"
+                    args = {}
+                    # Option 1. Function
+                    if "function" in task:
+                        args = task["args"] if "args" in task else {}
+                        fn_def = "async def fn({args}): {f}".format(
+                            args=",".join([k for k in args]),
+                            f = task['function']
+                        )                          
+                        if len(args) > 0:
+                            current = " ".join([f"{k}={v}" for k,v in args.items()])
+                        else:
+                            current = task['function']
+                        current = f"\[{current}]"
+                    elif "command" in task:
+                        command = [word for word in task["command"].split(" ") if word != ""]
+                        fn_def = "async def fn(): {f}".format(
+                            f=f"subprocess.run({command}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)"
+                        )
+                        args = {}
+                        current = f"\[{task['command']}]"
+                    exec(fn_def, globals())  
+                    await fn(**args)
+
+                    task_tree = step_tree.add(current)
+                    time.sleep(0.05)
+
+                    # When we know task is complete
+                    step_tree.children = [c for c in step_tree.children if c != task_tree]
+                    gui.progress.update(step_progress, advance=1, current=current)
+                    gui.overall_progress.update(0, advance=1)
+                job_tree.children = [c for c in job_tree.children if c != step_tree]
+                gui.log.print(f"[STEP] Completed: {step}")
+
+            gui.tree.children = [c for c in gui.tree.children if c != job_tree]
+            gui.progress.update(job_progress, advance=1)
+
+            gui.log.print(f"[JOB] Completed: {job}")
+
+        while not gui.progress.finished:
+            for task in gui.progress.tasks:
+                if task.completed:
+                    task.visible = False
+            #completed = sum(task.completed for task in gui.progress.tasks)
+            #gui.progress.update(0, completed=completed)
+            #gui.log.print(f"[WORKFLOW] Completed: {completed}")
+        while True:
+            ...
 
 
 if __name__ == "__main__":
-    main()
+
+    options = get_cli_options()
+    kwargs = vars(options)
+    asyncio.run(main(**kwargs))
