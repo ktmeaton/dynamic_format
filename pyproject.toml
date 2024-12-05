@@ -2,7 +2,7 @@
 name = "myproject"
 version = "0.1.0"
 dependencies = [
-    #"rich",
     "pyyaml",
-    "textual"
+    "textual",
+    "psutil"
 ]
