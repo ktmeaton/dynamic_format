@@ -12,17 +12,17 @@ jobs:
       function:
         run:
           function: "1+1"
-  # function:
-  #   steps:
-  #     simple:
-  #       function: "1 + 1"
-  #     slow:
-  #       function: "time.sleep({seconds})"
-  #       variables:
-  #         seconds:
-  #           - 1
-  #           - 2
-  #           - 3
+  function:
+    steps:
+      simple:
+        function: "1 + 1"
+      slow:
+        function: "time.sleep({seconds})"
+        variables:
+          seconds:
+            - 1
+            - 2
+            - 3
       # expand_function:
       #   function: "{x} + {y}"
       #   variables:

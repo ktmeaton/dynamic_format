@@ -1,7 +1,8 @@
 [project]
-name = "dynamic-format"
+name = "myproject"
 version = "0.1.0"
 dependencies = [
-    "rich",
-    "pyyaml"
+    #"rich",
+    "pyyaml",
+    "textual"
 ]
