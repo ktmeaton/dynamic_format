@@ -2,7 +2,12 @@
 name = "myproject"
 version = "0.1.0"
 dependencies = [
-    "pyyaml",
-    "textual",
-    "psutil"
+    "pyyaml==6.0.2",
+    "textual==0.88.1",
+    "psutil==6.1.0"
 ]
+
+[tool.setuptools.packages.find]
+where = ["src","resources"] 
+include = ["code*"]
+exclude = [] 
