@@ -12,9 +12,11 @@ import logging
 from workflow import Workflow, QueuingHandler
 
 from textual.app import App, ComposeResult
-from textual.containers import Center, Middle, Horizontal
+from textual.containers import HorizontalGroup, Horizontal, Center, Middle
 from textual import work, events
-from textual.widgets import Header, Footer, Static, RichLog, Tree, Label, ProgressBar   
+from textual.widgets import Header, Footer, Static, RichLog, Tree, Label, ProgressBar
+from textual.timer import Timer  
+from textual.renderables import bar
 
 
 class TaskTree(Tree):
@@ -30,6 +32,41 @@ class TaskTree(Tree):
     """
     pass
 
+class ProgressJob(HorizontalGroup):
+    DEFAULT_CSS = """
+    Label {
+        width: 14;
+    }
+    .custom-bar Bar {
+        width: 15;
+    }
+    .custom-bar Bar > .bar--bar {
+        color: blue;
+        background: yellow 30%;
+    }
+    """
+    job = None
+    total = 0
+    steps = 0
+    label = None
+    bar = None
+    max_label_len = 10
+
+    def __init__(self, job:str, total:int=0, completed:int=0):
+        self.job = job
+        self.total = total
+        super().__init__()
+
+    def compose(self) -> ComposeResult:
+        if len(self.job) > self.max_label_len:
+            self.label = Label(f"{self.job[0:self.max_label_len]}...")
+        else:
+            self.label = Label(self.job)
+        yield self.label
+        self.bar = ProgressBar(10, classes="custom-bar")
+        self.bar.advance(5)
+        yield self.bar
+
 class Progress(Static):
     BORDER_TITLE = "Progress"
     DEFAULT_CSS = """
@@ -44,21 +81,11 @@ class Progress(Static):
 
     text = "Test"
 
-    bars = OrderedDict()
+    jobs = OrderedDict()
 
-    def compose(self) -> ComposeResult:
-        #return self.add("default")
-        yield Label(self.text)
-        self.bars["default"] = ProgressBar()
-        self.bars["extra"] = ProgressBar()
-        self.bars["default"].total = 100
-        for name,bar in self.bars.items():
-            yield bar
-    # def add(self, identifier) -> ComposeResult:
-    #     # with Center():
-    #     #     with Middle():
-    #     #         self.bars[identifier] = ProgressBar()
-    #     # yield self.bars[identifier]
+    def add_job(self, job:str, total=None) -> None:
+        self.jobs[job] = ProgressJob(job=job, total=total)
+        self.mount(self.jobs[job])
 
 class Backend(Static):
     BORDER_TITLE = "Backend"
@@ -174,12 +201,20 @@ class Gui(App):
         self.gui = self.set_interval(1 / self.fps, self.update_gui)
         self.gui.resume()
 
+        # Calculate resource usage at the requested FPS
+        self.resources_calculator = self.set_interval(1 / self.fps, self.calculate_resources)
+        self.resources_calculator.resume()
+
+        # Display resource usage at a slower FPS (2), otherwise it's distracting
+        # how fast the numbers change.
+        self.backend_updater = self.set_interval(1 / 2, self.update_backend)
+        self.backend_updater.resume()
+
         await self.load_workflow()
         self.run_workflow()
 
 
     def create_logger(self) -> None:
-        #log_format = '%(asctime)s %(name)6s %(levelname)8s: %(message)s'
         log_format = '%(asctime)s %(funcName)20s %(levelname)8s: %(message)s'
         #  Root logger
         logging.basicConfig(
@@ -202,7 +237,7 @@ class Gui(App):
         self.update_log()
         self.update_tree()
         self.update_progress()
-        self.update_backend()
+
 
     @work
     async def update_log(self):
@@ -217,30 +252,33 @@ class Gui(App):
             if job not in self.task_tree_lookup:
                 job_node = self.task_tree.root.add(job, expand=True)
                 self.task_tree_lookup[identifier] = job_node
-                self.logger.debug(f"Add {job} progress bar")
+                self.logger.debug(f"Adding progress bar: {job}")
+                self.progress.add_job(job)
                 #self.progress.refresh(recompose)
-                #self.progress.add(job)
-                self.progress.refresh(recompose=True)
-            else:
-                job_node = self.task_tree_lookup[job]
-            for step in self.workflow.get_steps(job):
-                identifier = f"{job}.{step}"
-                if identifier not in self.task_tree_lookup:
-                    step_node = job_node.add(step, expand=True)
-                    self.task_tree_lookup[identifier] = step_node 
-                else:
-                    step_node = self.task_tree_lookup[identifier]
-                for task in self.workflow.get_tasks(job, step):
-                    identifier = f"{job}.{step}.{task}"
-                    if identifier not in self.task_tree_lookup: 
-                        task_label = "{:10} {:5}".format(task, "⏩")
-                        task_node = step_node.add_leaf(task_label)
-                        self.task_tree_lookup[identifier] = task_node 
-                    else:
-                        task_node = self.task_tree_lookup[identifier]
+
+                #self.progress.mount(Label(job))
+                #self.progress.mount(ProgressBar())
+                #self.progress.refresh(recompose=True)
+            # else:
+            #     job_node = self.task_tree_lookup[job]
+            # for step in self.workflow.get_steps(job):
+            #     identifier = f"{job}.{step}"
+            #     if identifier not in self.task_tree_lookup:
+            #         step_node = job_node.add(step, expand=True)
+            #         self.task_tree_lookup[identifier] = step_node 
+            #     else:
+            #         step_node = self.task_tree_lookup[identifier]
+            #     for task in self.workflow.get_tasks(job, step):
+            #         identifier = f"{job}.{step}.{task}"
+            #         if identifier not in self.task_tree_lookup: 
+            #             task_label = "{:10} {:5}".format(task, "⏩")
+            #             task_node = step_node.add_leaf(task_label)
+            #             self.task_tree_lookup[identifier] = task_node 
+            #         else:
+            #             task_node = self.task_tree_lookup[identifier]
 
     @work
-    async def update_backend(self):
+    async def calculate_resources(self):
         now = datetime.now()
         self.backend.fps = 1/ (now - self.backend.fps_time).total_seconds() 
         self.backend.fps_time = now
@@ -249,12 +287,16 @@ class Gui(App):
         self.backend.concurrent = len(asyncio.all_tasks())
         self.backend.messages = self.message_queue.qsize()
         self.backend.tasks = len(self.workflow.tasks)
+
+    @work
+    async def update_backend(self):
         self.backend.refresh(recompose=True)
 
     @work
     async def update_progress(self):
-        self.progress.text = "Updated"
-        self.progress.bars["default"].advance(1)
+        pass
+        #self.progress.text = "Updated"
+        #self.progress.bars["default"].advance(1)
 
     async def load_workflow(self) -> None:
         self.logger.info(f"Loading workflow: {self.workflow_yaml}")
