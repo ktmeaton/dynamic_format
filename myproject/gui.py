@@ -60,10 +60,10 @@ class Progress(Static):
     #     #         self.bars[identifier] = ProgressBar()
     #     # yield self.bars[identifier]
 
-class Resources(Static):
-    BORDER_TITLE = "Resources"
+class Backend(Static):
+    BORDER_TITLE = "Backend"
     DEFAULT_CSS = """
-    Resources {
+    Backend {
         column-span: 1;
         height: 100%;
         border: solid blue;
@@ -73,14 +73,20 @@ class Resources(Static):
     """
 
     threads = threading.active_count()
-    memory = psutil.virtual_memory().total >> 20
+    memory = psutil.virtual_memory().used >> 20
     fps = 0
     fps_time = datetime.now()
+    concurrent = 0
+    messages = 0
+    tasks = 0
 
     def compose(self) -> ComposeResult:
-        yield Label(f"Threads: {self.threads}")
-        yield Label(f"Memory:  {self.memory} MB")
-        yield Label(f"FPS:     {int(self.fps)}")
+        yield Label(f"Threads:     {self.threads}")
+        yield Label(f"Memory:      {self.memory} MB")
+        yield Label(f"FPS:         {int(self.fps)}")
+        yield Label(f"Concurrent:  {self.concurrent}")
+        yield Label(f"Messages:    {self.messages}")
+        yield Label(f"Tasks:       {self.tasks}")
 
 class Log(RichLog):
     BORDER_TITLE = "Log"
@@ -104,7 +110,7 @@ class Gui(App):
         grid-rows: 60% 40%;
     }
 
-    .resources {
+    .backend {
         column-span: 1;
         height: 100%;
         border: solid yellow;
@@ -154,8 +160,8 @@ class Gui(App):
         self.progress = Progress()
         yield self.progress
     
-        self.resources = Resources()
-        yield self.resources
+        self.backend = Backend()
+        yield self.backend
 
         self.run_log = Log(highlight=True, markup=True)
         yield self.run_log
@@ -196,7 +202,7 @@ class Gui(App):
         self.update_log()
         self.update_tree()
         self.update_progress()
-        self.update_resources()
+        self.update_backend()
 
     @work
     async def update_log(self):
@@ -234,13 +240,16 @@ class Gui(App):
                         task_node = self.task_tree_lookup[identifier]
 
     @work
-    async def update_resources(self):
+    async def update_backend(self):
         now = datetime.now()
-        self.resources.fps = 1/ (now - self.resources.fps_time).total_seconds() 
-        self.resources.fps_time = now
-        self.resources.memory = psutil.virtual_memory().total >> 20
-        self.resources.threads = threading.active_count()
-        self.resources.refresh(recompose=True)
+        self.backend.fps = 1/ (now - self.backend.fps_time).total_seconds() 
+        self.backend.fps_time = now
+        self.backend.memory = psutil.virtual_memory().used >> 20
+        self.backend.threads = threading.active_count()
+        self.backend.concurrent = len(asyncio.all_tasks())
+        self.backend.messages = self.message_queue.qsize()
+        self.backend.tasks = len(self.workflow.tasks)
+        self.backend.refresh(recompose=True)
 
     @work
     async def update_progress(self):

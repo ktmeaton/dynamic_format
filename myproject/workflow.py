@@ -9,16 +9,6 @@ from typing import List
 import logging
 import queue
 
-# class Step:
-#     def __init__(self, name, id):
-#         self.name = name
-#         self.id   = id
-
-# class TaskResult:
-#     def __init__(self, identifier):
-#         self.id  = identifier
-#     def __repr__(self):
-#         return f"{self.id}"
 
 class Workflow:
     def __init__(self, path:str):
