@@ -6,28 +6,115 @@ import yaml
 import time
 from typing import List
 
+import argparse
+import enum
 import logging
 import queue
 
 
+class Display(enum.IntEnum):
+    GUI = 1
+    TEXT = 2
+
+    def __str__(self):
+        return self.name.lower()
+
+    def __repr__(self):
+        return str(self)
+
+    @staticmethod
+    def argparse(s):
+        try:
+            return Display[s.upper()]
+        except KeyError:
+            return s
+
+class Log():
+    def __init__(
+        self, 
+        name:str       = "workflow",
+        file:str       = "workflow.log",
+        formatter:str  = '%(asctime)s %(name)-10s %(funcName)-14s %(levelname)-8s: %(message)s',
+        level          = logging.INFO,
+        datefmt        = '%Y-%m-%d %H:%M:%S',
+        stdout         = True,
+    ):
+        self.name      = name
+        self.file      = file
+        self.formatter = formatter
+        self.level     = level
+        self.datefmt   = datefmt
+        self.stdout    = stdout
+
 class Workflow:
-    def __init__(self, path:str):
+    def __init__(self, path:str, log:Log=None):
         """Create a Workflow based on a YAML path"""
-        self.path = path
-        self.tree = OrderedDict()
-        self.tasks = OrderedDict()
+        if log != None:
+            self.log  = log
+        else:
+            self.log  = Log()
+        self.logger   = None
+        self.messages = queue.Queue()
+        self.path     = path
+        self.tasks    = OrderedDict()
+        self.tree     = OrderedDict()
 
-        with open(path) as infile:
-            self.data = yaml.safe_load(infile)
-        self.name = self.data["name"] if "name" in self.data else "unknown"
-        self.jobs = self.data["jobs"] if "jobs" in self.data else {}
-        self.logger = logging.getLogger(name='workflow')
+        self.create_logger()
 
+        # with open(path) as infile:
+        #     self.data = yaml.safe_load(infile)
+        # self.name = self.data["name"] if "name" in self.data else "unknown"
+        # self.jobs = self.data["jobs"] if "jobs" in self.data else {}
+        # self.logger = logging.getLogger(name='workflow')
+
+    # def __repr__(self):
+    #     return 
+
+    def create_logger(self) -> None:
+        """Create a logger that sends messages to the queue."""
+        #  Root logger
+        logging.basicConfig(
+            format=self.log.formatter,
+            level=self.log.level,
+            datefmt=self.log.datefmt,
+            filename=self.log.file,
+            filemode='w'
+        )
+        self.logger = logging.getLogger(name=self.log.name)
+        formatter   = logging.Formatter(self.log.formatter, self.log.datefmt)
+    
+        # Add a handler to pass messages to our queue
+        handler = QueuingHandler(message_queue=self.messages, level=self.log.level)
+        handler.setFormatter(formatter)
+        handler.setLevel(self.log.level)
+        self.logger.addHandler(handler)
+
+        # Add a handler to write messages to a file
+        if self.log.file:
+            file_handler = logging.FileHandler(self.log.file)
+            file_handler.setFormatter(formatter)
+            file_handler.setLevel(self.log.level)
+            self.logger.addHandler(file_handler)
+
+        # Add a handler to write messages to stdout
+        if self.log.stdout:
+            stdout_handler = logging.StreamHandler()
+            stdout_handler.setFormatter(formatter)
+            stdout_handler.setLevel(self.log.level)
+            self.logger.addHandler(stdout_handler)
+    
+        self.logger.debug(f"Logger ready.")
+
+    async def load(self) -> None:
+        self.logger.info(f"Loading workflow: {self.workflow_yaml}")
+        self.workflow = Workflow(self.workflow_yaml)
+        self.logger.info(f"Workflow loaded: {self.workflow.name}")
+        self.title = self.workflow.name
 
     def run_workflow(self, log_name: str):
         """Run workflow and add tasks to the queue."""
         logger = logging.getLogger(name=log_name)
-        logger.info("Running workflow.")
+        self.logger.info("Running workflow.")
         for job,job_data in self.jobs.items():
             self.validate_job(job, logger)
             self.tree[job] = OrderedDict()
@@ -61,8 +148,6 @@ class Workflow:
 
     def get_tasks(self, job, step) -> dict:
         return self.jobs[job]["steps"][step]
-
-
 
     async def demo(self, identifier):
         if "slow" in identifier:

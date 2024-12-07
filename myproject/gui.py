@@ -9,7 +9,7 @@ import threading
 
 import queue
 import logging
-from workflow import Workflow, QueuingHandler
+from workflow import Workflow, QueuingHandler, Log
 
 from textual.app import App, ComposeResult
 from textual.containers import HorizontalGroup, Horizontal, Center, Middle
@@ -161,14 +161,12 @@ class Gui(App):
         text-align: right;
     }
     """
-
-    message_queue = queue.Queue()
+    messages = queue.Queue()
     workflow = None
 
-    def __init__(self, fps:int=60, workflow_yaml:dict={}, safe:bool=True, log:str="myproject.log"):
+    def __init__(self, path:str, fps:int=60, safe:bool=True, log:Log=None):
         self.fps = fps
-        self.workflow_yaml = workflow_yaml
-        self.logfile = log
+        self.workflow = Workflow(path, log=log)
         super().__init__()
 
     def compose(self) -> ComposeResult:
@@ -198,53 +196,54 @@ class Gui(App):
         self.subtitle = "subtitle"
 
         self.create_logger()
+        self.logger.info("This is an info test.")
+        self.logger.warning("This is a warning test.")
+        #self.load_workflow()
+        # Create a logger and connect it to the message queue
+        # self.create_logger()
+
+        # Start a GUI-updating function that runs at FPS
         self.gui = self.set_interval(1 / self.fps, self.update_gui)
         self.gui.resume()
 
-        # Calculate resource usage at the requested FPS
-        self.resources_calculator = self.set_interval(1 / self.fps, self.calculate_resources)
-        self.resources_calculator.resume()
+        # # Display resource usage at a slower FPS (2), otherwise it's distracting
+        # # how fast the numbers change.
+        # self.backend_updater = self.set_interval(1 / 2, self.update_backend)
+        # self.backend_updater.resume()
 
-        # Display resource usage at a slower FPS (2), otherwise it's distracting
-        # how fast the numbers change.
-        self.backend_updater = self.set_interval(1 / 2, self.update_backend)
-        self.backend_updater.resume()
+        # Load the workflow YAML 
+        #await self.load_workflow()
 
-        await self.load_workflow()
-        self.run_workflow()
+        # Start running the workflow
+        # self.run_workflow()
 
 
     def create_logger(self) -> None:
-        log_format = '%(asctime)s %(funcName)20s %(levelname)8s: %(message)s'
-        #  Root logger
-        logging.basicConfig(
-            format=log_format,
-            level=logging.DEBUG,
-            datefmt='%Y-%m-%d %H:%M:%S',
-            filename=self.logfile,
-            filemode='w'
-        )
-        # Child logger
+        """Create a logger that sends messages to the queue."""
         self.logger = logging.getLogger(name="gui")
-        handler = QueuingHandler(message_queue=self.message_queue, level=logging.DEBUG)
-        formatter = logging.Formatter(log_format)
+        handler     = QueuingHandler(message_queue=self.messages, level=self.workflow.log.level)
+        formatter   = logging.Formatter(self.workflow.log.formatter)
+
         handler.setFormatter(formatter)
         self.logger.addHandler(handler)
-        self.logger.debug("Logger ready.")
+        self.logger.debug(f"Logger ready.")
 
     @work
     async def update_gui(self) -> None:
         self.update_log()
-        self.update_tree()
-        self.update_progress()
+        #self.update_tree()
+        #self.update_progress()
+        #self.calculate_resources()
 
 
     @work
     async def update_log(self):
-        if not self.message_queue.empty():
-            message = self.message_queue.get()
+        if not self.messages.empty():
+            message = self.messages.get()
             self.run_log.write(message)
-
+        if not self.workflow.messages.empty():
+            message = self.workflow.messages.get()
+            self.run_log.write(message)
     @work
     async def update_tree(self):
         for job in self.workflow.jobs:
@@ -285,7 +284,7 @@ class Gui(App):
         self.backend.memory = psutil.virtual_memory().used >> 20
         self.backend.threads = threading.active_count()
         self.backend.concurrent = len(asyncio.all_tasks())
-        self.backend.messages = self.message_queue.qsize()
+        self.backend.messages = self.messages.qsize()
         self.backend.tasks = len(self.workflow.tasks)
 
     @work
@@ -299,10 +298,11 @@ class Gui(App):
         #self.progress.bars["default"].advance(1)
 
     async def load_workflow(self) -> None:
-        self.logger.info(f"Loading workflow: {self.workflow_yaml}")
-        self.workflow = Workflow(self.workflow_yaml)
-        self.logger.info(f"Workflow loaded: {self.workflow.name}")
-        self.title = self.workflow.name
+        self.workflow = Workflow(self.path)
+        #self.title = self.workflow.name
+        # self.logger.info(f"Loading workflow: {self.path}")
+        # self.workflow = Workflow(self.path)
+        # self.logger.info(f"Workflow loaded: {self.workflow.name}")
 
 
     @work(thread=True)
